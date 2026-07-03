@@ -1,0 +1,11 @@
+# Bulk per-ticker price data (~1000 tickers x up to 26y) — re-fetch with
+# download_data.py rather than committing.
+data/prices/
+
+# Full long-format results are regenerable from the data; only the summary
+# CSV and charts under results/ get committed.
+results/rolling_results.csv.gz
+
+__pycache__/
+log/
+.pytest_cache/

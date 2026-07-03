@@ -21,6 +21,17 @@ PLOT_HAIRCUT_BPS = 5  # which HAIRCUTS_BPS entry to draw as the "net" curve
 TRADING_DAYS = 252
 
 
+def _parse_dates(raw: pd.Series) -> pd.Series:
+    # Two schemas are in play: the vendored SPY.csv uses %m/%d/%Y, while
+    # per-ticker files written by download_data.py use ISO %Y-%m-%d.
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return pd.to_datetime(raw, format=fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"unrecognized date format, e.g. {raw.iloc[0]!r}")
+
+
 def load_prices(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -28,8 +39,9 @@ def load_prices(path: str) -> pd.DataFrame:
             "run this script from the repo root or update DATA_PATH."
         )
     df = pd.read_csv(path)
-    df["DateTime"] = pd.to_datetime(df["DateTime"], format="%m/%d/%Y")
-    df = df.sort_values("DateTime").set_index("DateTime")
+    date_col = "DateTime" if "DateTime" in df.columns else "Date"
+    df[date_col] = _parse_dates(df[date_col])
+    df = df.sort_values(date_col).set_index(date_col)
     df = df[["Open", "Close"]]
 
     # The source CSV is fetched in chunks (newest-year-first) and is not

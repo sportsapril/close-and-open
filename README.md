@@ -56,7 +56,7 @@ the edge. See the numbers below.
 
 ## Empirical backtest (this repo)
 
-`backtest.py` loads `data/SPY.csv` (daily OHLC, June 2000 – March 2026) and
+`backtest.py` loads `data/SPY.csv` (daily OHLC, January 2000 – March 2026) and
 decomposes each day's return into an **overnight** leg (`Open_t /
 Close_{t-1} - 1`) and an **intraday** leg (`Close_t / Open_t - 1`), which by
 construction multiply back out to the buy-and-hold return. It then applies a
@@ -78,7 +78,7 @@ Run it yourself: `pip install -r requirements.txt && python backtest.py`
 
 Run the test suite: `pip install -r requirements-dev.txt && python -m pytest test_backtest.py -q`
 
-Results, SPY, 2000-06-06 through 2026-03-20 (6,592 trading days):
+Results, SPY, 2000-01-03 through 2026-03-20 (6,592 trading days):
 
 | strategy | total return | annualized return | annualized vol | Sharpe | beats buy&hold? |
 |---|---:|---:|---:|---:|:---:|
@@ -91,6 +91,43 @@ Results, SPY, 2000-06-06 through 2026-03-20 (6,592 trading days):
 | overnight, net of 10bp/day | -99.5% | -18.64% | 11.26% | -1.66 | no |
 
 ![Overnight vs intraday vs buy & hold equity curves](overnight_backtest_SPY.png)
+
+## Universe rolling-window backtest (Russell 1000)
+
+Beyond the single-index test above, the repo can ask the broader question:
+**how many individual stocks could the overnight strategy have used to beat
+the SPX index return — in which periods, at which window sizes, and at
+which cost levels?**
+
+Pipeline:
+
+1. `python download_data.py` — fetches the current Russell 1000 membership
+   (iShares IWB holdings; falls back to the Wikipedia S&P 500 list) into
+   `data/universe.csv`, then downloads each ticker's full daily history via
+   yfinance into `data/prices/{TICKER}.csv` (split- and dividend-adjusted;
+   resumable; `--test N` for a quick run). Requires internet access to
+   ishares.com / finance.yahoo.com.
+2. `python rolling_backtest.py` — for every stock, every rolling calendar
+   window of 1–5 years (annual stride, ≥95% trading-day coverage required
+   of both the stock and the benchmark), and every haircut in
+   `HAIRCUTS_BPS`, compares the overnight strategy's annualized return
+   against SPY buy-and-hold over the same window. Writes a long-format
+   results table, a summary CSV, and two charts under `results/`.
+
+Known limitations (read before quoting numbers):
+
+- **Survivorship bias**: the universe is *today's* Russell 1000 members.
+  Stocks that delisted or fell out of the index are absent, which inflates
+  the fraction of "winners."
+- The SPY benchmark here is a price return (the vendored CSV is not
+  dividend-adjusted) while the stock data is total-return-adjusted; this
+  slightly flatters the strategy vs. the real SPX total return.
+- Current constituents' *history* includes years before they joined the
+  index (fine for "could this stock have beaten SPX," but not an
+  index-membership-aware simulation).
+
+Results: pending the data download (blocked in the authoring sandbox until
+network access to Yahoo Finance is enabled).
 
 ## Verdict
 
