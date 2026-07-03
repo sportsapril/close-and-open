@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Download daily OHLC history for the Russell 1000 universe via yfinance.
 
-Universe: current iShares IWB (Russell 1000 ETF) holdings, fetched from
-ishares.com. Falls back to the Wikipedia S&P 500 constituent table if the
-IWB download fails. Note this is the *current* membership either way —
+Universe: the Russell 1000 components table on Wikipedia (~1000 rows;
+the iShares IWB holdings CSV endpoint now serves bot-detection HTML, so
+Wikipedia is the primary source). Falls back to the Wikipedia S&P 500
+constituent table. Note this is the *current* membership either way —
 point-in-time constituent history isn't freely available, so the backtest
 built on top of this carries survivorship bias.
 
-Prices are downloaded per ticker with auto_adjust=True (split- and
-dividend-adjusted). Unadjusted opens/closes would put fake +/-50% overnight
+Prices come straight from Yahoo Finance's v8 chart API (yfinance's own
+backend; the library itself is unusable behind this sandbox's TLS proxy
+because its curl_cffi browser-impersonation handshake gets reset). Both
+Open and Close are scaled by adjclose/close, i.e. split- AND
+dividend-adjusted: unadjusted opens/closes would put fake +/-50% overnight
 returns at every split, and dividends accrue at the ex-date open, so the
 adjusted series credits the overnight leg correctly.
 
@@ -34,10 +38,7 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-IWB_HOLDINGS_URL = (
-    "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/"
-    "1467271812596.ajax?fileType=csv&fileName=IWB_holdings&dataType=fund"
-)
+WIKI_RUSSELL_URL = "https://en.wikipedia.org/wiki/Russell_1000_Index"
 WIKI_SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 UA_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
 
@@ -51,27 +52,20 @@ def _normalize_ticker(ticker: str) -> str:
 
 
 def fetch_russell_1000() -> pd.DataFrame:
-    """Fetch current Russell 1000 members from the iShares IWB holdings CSV."""
-    resp = requests.get(IWB_HOLDINGS_URL, headers=UA_HEADERS, timeout=30)
+    """Fetch current Russell 1000 members from the Wikipedia components table."""
+    resp = requests.get(WIKI_RUSSELL_URL, headers=UA_HEADERS, timeout=30)
     resp.raise_for_status()
-    lines = resp.text.splitlines()
-    # The file leads with fund metadata; the holdings table starts at the
-    # header line beginning with "Ticker".
-    try:
-        header_idx = next(i for i, l in enumerate(lines) if l.startswith("Ticker"))
-    except StopIteration:
-        raise ValueError("IWB holdings CSV: no 'Ticker' header line found")
-    df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), on_bad_lines="skip")
-    df = df[df["Asset Class"] == "Equity"]
-    df = df[df["Ticker"].notna() & (df["Ticker"] != "--")]
+    tables = pd.read_html(io.StringIO(resp.text))
+    table = next(t for t in tables if "Symbol" in t.columns and len(t) > 500)
+    table = table.dropna(subset=["Symbol", "Company"])
     out = pd.DataFrame({
-        "ticker": df["Ticker"].map(_normalize_ticker),
-        "name": df["Name"].str.strip(),
-        "sector": df.get("Sector", pd.Series(dtype=str)),
+        "ticker": table["Symbol"].map(_normalize_ticker),
+        "name": table["Company"].str.strip(),
+        "sector": table.get("GICS Sector", pd.Series(dtype=str)),
     }).drop_duplicates("ticker")
     if len(out) < 800:  # sanity: Russell 1000 should be ~1000 names
-        raise ValueError(f"IWB holdings parse looks wrong: only {len(out)} equities")
-    logger.info("Universe: %d Russell 1000 members from iShares IWB", len(out))
+        raise ValueError(f"components parse looks wrong: only {len(out)} rows")
+    logger.info("Universe: %d Russell 1000 members from Wikipedia", len(out))
     return out
 
 
@@ -94,25 +88,51 @@ def get_universe() -> pd.DataFrame:
     try:
         return fetch_russell_1000()
     except Exception as e:
-        logger.warning("iShares IWB fetch failed (%s); falling back to S&P 500", e)
+        logger.warning("Russell 1000 fetch failed (%s); falling back to S&P 500", e)
         return fetch_sp500_fallback()
 
 
-def download_ticker(ticker: str, retries: int = 3, backoff: float = 2.0) -> pd.DataFrame | None:
-    """Full adjusted daily history for one ticker, or None if unavailable."""
-    import yfinance as yf
+CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 
+
+def download_ticker(ticker: str, retries: int = 3, backoff: float = 2.0) -> pd.DataFrame | None:
+    """Full adjusted daily history for one ticker, or None if unavailable.
+
+    Uses explicit period1/period2 epoch params: range=max silently degrades
+    to 3-month bars, while explicit periods return true daily granularity.
+    """
+    params = {"period1": 0, "period2": int(time.time()), "interval": "1d"}
     for attempt in range(retries):
         try:
-            hist = yf.Ticker(ticker).history(period="max", auto_adjust=True)
-            if hist.empty:
-                logger.warning("%s: no data", ticker)
+            resp = requests.get(CHART_URL.format(ticker=ticker), params=params,
+                                headers=UA_HEADERS, timeout=30)
+            if resp.status_code == 404:
+                logger.warning("%s: unknown to Yahoo (404)", ticker)
                 return None
-            out = hist.reset_index()[["Date", "Open", "Close"]].copy()
-            out["Date"] = pd.to_datetime(out["Date"], utc=True).dt.strftime("%Y-%m-%d")
-            # Adjusted history can contain zero opens on ancient rows; the
-            # backtest asserts positivity, so drop them here.
+            resp.raise_for_status()
+            result = resp.json()["chart"]["result"][0]
+            if result["meta"].get("dataGranularity") != "1d":
+                raise ValueError(f"granularity {result['meta'].get('dataGranularity')!r} != 1d")
+            quote = result["indicators"]["quote"][0]
+            adjclose = result["indicators"]["adjclose"][0]["adjclose"]
+            dates = (pd.to_datetime(result["timestamp"], unit="s", utc=True)
+                     .tz_convert(result["meta"]["exchangeTimezoneName"])
+                     .strftime("%Y-%m-%d"))
+            out = pd.DataFrame({
+                "Date": dates,
+                "Open": quote["open"],
+                "Close": quote["close"],
+                "AdjClose": adjclose,
+            }).dropna()
+            # Scale Open by the same split+dividend factor as Close, then
+            # keep only the adjusted columns under the standard names.
+            out["Open"] = out["Open"] * out["AdjClose"] / out["Close"]
+            out["Close"] = out["AdjClose"]
             out = out[(out["Open"] > 0) & (out["Close"] > 0)]
+            out = out.drop_duplicates("Date")[["Date", "Open", "Close"]]
+            if out.empty:
+                logger.warning("%s: no usable rows", ticker)
+                return None
             return out
         except Exception as e:
             wait = backoff * 2 ** attempt
