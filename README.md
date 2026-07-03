@@ -126,8 +126,63 @@ Known limitations (read before quoting numbers):
   index (fine for "could this stock have beaten SPX," but not an
   index-membership-aware simulation).
 
-Results: pending the data download (blocked in the authoring sandbox until
-network access to Yahoo Finance is enabled).
+### Results
+
+Run: 998 of 1,002 current Russell 1000 members downloaded (full available
+history per ticker, some back to 1970; 4 tickers unavailable on Yahoo),
+978 tickers with enough coverage for at least one window, 704,424
+(ticker, window, haircut) combinations, benchmark windows 2000–2025.
+
+**% of stock-windows where the overnight strategy beat SPX buy-and-hold:**
+
+| window | 0bps | 1bps | 2bps | 5bps | 10bps | 20bps | 50bps | 100bps |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1y | 45.1 | 40.6 | 36.7 | 25.8 | 13.4 | 3.8 | 0.5 | 0.1 |
+| 2y | 45.6 | 39.4 | 33.9 | 20.4 | 8.6 | 2.2 | 0.3 | 0.1 |
+| 3y | 45.0 | 37.9 | 31.1 | 17.0 | 6.6 | 1.6 | 0.2 | 0.0 |
+| 4y | 44.7 | 36.8 | 29.4 | 14.8 | 5.6 | 1.3 | 0.2 | 0.0 |
+| 5y | 44.5 | 35.8 | 28.4 | 13.8 | 4.9 | 1.2 | 0.1 | 0.0 |
+
+**Number of stocks (of 978) that beat SPX in a *majority* of their windows:**
+
+| window | 0bps | 1bps | 2bps | 5bps | 10bps | 20bps |
+|---|---:|---:|---:|---:|---:|---:|
+| 1y | 295 | 203 | 151 | 52 | 13 | 2 |
+| 2y | 377 | 266 | 172 | 56 | 15 | 7 |
+| 3y | 348 | 258 | 165 | 54 | 11 | 4 |
+| 4y | 364 | 272 | 183 | 57 | 13 | 4 |
+| 5y | 349 | 247 | 178 | 56 | 17 | 4 |
+
+![% of stock-windows beating SPX, by window size and haircut](results/pct_beating_heatmap.png)
+
+![% of stocks beating SPX by window start year](results/pct_beating_timeseries.png)
+
+What the numbers say:
+
+1. **Gross of costs it's a worse-than-coin-flip bet.** Even with zero
+   trading costs, only ~45% of stock-windows beat SPX, and only ~30–38%
+   of stocks won a majority of their windows.
+2. **Costs are the story, again.** At 5bps/day round trip, ~5% of stocks
+   (52–57 of 978) still beat SPX in a majority of windows; at 20bps/day
+   it is essentially zero (2–7 stocks). This is the single-index result
+   from the section above, replicated a thousand times.
+3. **Shorter windows look better only because they're noisier.** 1y
+   windows beat SPX in 25.8% of cases at 5bps vs. 13.8% for 5y windows —
+   dispersion, not persistence: hold the strategy longer and the cost
+   drag reliably wins.
+4. **The "winners" are momentum rockets, not overnight-anomaly stocks.**
+   The top names by fraction of winning windows (RKLB, VKTX, ASTS, MU,
+   AMD, APP...) are explosive stocks whose *any* long exposure —
+   including plain buy-and-hold — trounced SPX. The overnight mechanic
+   isn't the source of their edge; picking them in advance is the hard
+   part.
+5. **The edge is concentrated in the past and in bear markets.** Hit
+   rates were 30–65% for windows starting 2000–2008 and mostly 5–20%
+   after 2009, spiking only when SPX itself fell (2008, 2018, 2022) —
+   a half-volatility strategy "beats the index" mainly when the index
+   goes down. Restricting to windows starting 2015+ at 5bps leaves only
+   ~40–60 majority-winners out of 978, most of them the same momentum
+   names.
 
 ## Verdict
 
