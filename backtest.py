@@ -8,6 +8,8 @@ providers such as Yahoo Finance).
 Usage: python backtest.py
 """
 
+import os
+
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
@@ -15,19 +17,37 @@ import matplotlib.pyplot as plt
 
 DATA_PATH = "data/SPY.csv"
 HAIRCUTS_BPS = [0, 1, 2, 5, 10, 20, 50, 100]
+PLOT_HAIRCUT_BPS = 5  # which HAIRCUTS_BPS entry to draw as the "net" curve
 TRADING_DAYS = 252
 
 
 def load_prices(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"{path!r} not found (cwd={os.getcwd()!r}); "
+            "run this script from the repo root or update DATA_PATH."
+        )
     df = pd.read_csv(path)
     df["DateTime"] = pd.to_datetime(df["DateTime"], format="%m/%d/%Y")
     df = df.sort_values("DateTime").set_index("DateTime")
-    return df[["Open", "Close"]]
+    df = df[["Open", "Close"]]
+
+    # The source CSV is fetched in chunks (newest-year-first) and is not
+    # globally sorted on disk; the sort above is load-bearing, not
+    # cosmetic. These assertions guard against that assumption silently
+    # breaking, and against corrupt rows (zero/negative prices).
+    assert df.index.is_monotonic_increasing, "prices are not sorted by date"
+    assert not df.index.duplicated().any(), "duplicate dates in price data"
+    assert (df[["Open", "Close"]] > 0).all().all(), "non-positive price in data"
+    return df
 
 
 def annualize_return(equity: pd.Series) -> float:
+    final = equity.iloc[-1]
+    if final <= 0:
+        return -1.0
     n_days = len(equity)
-    return equity.iloc[-1] ** (TRADING_DAYS / n_days) - 1
+    return final ** (TRADING_DAYS / n_days) - 1
 
 
 def annualize_vol(daily_ret: pd.Series) -> float:
@@ -58,10 +78,11 @@ def build_returns(prices: pd.DataFrame) -> pd.DataFrame:
     }).dropna()
 
 
-def haircut_sweep(rets: pd.DataFrame) -> list[dict]:
+def haircut_sweep(rets: pd.DataFrame, bh_ann_ret: float) -> list[dict]:
     # One round trip (buy + sell) per day, cost expressed in bps of
-    # notional, subtracted from that day's overnight return.
-    bh_ann_ret = annualize_return((1 + rets["buy_and_hold"]).cumprod())
+    # notional, subtracted from that day's overnight return. bps=0 is
+    # deliberately included as the sweep's own gross baseline, so callers
+    # shouldn't also print a separate "overnight, gross" row.
     rows = []
     for bps in HAIRCUTS_BPS:
         net_ret = rets["overnight"] - bps / 10000
@@ -92,7 +113,9 @@ def plot_equity_curves(rets: pd.DataFrame) -> str:
     fig, ax = plt.subplots(figsize=(10, 6))
     (1 + rets["buy_and_hold"]).cumprod().plot(ax=ax, label="Buy & hold")
     (1 + rets["overnight"]).cumprod().plot(ax=ax, label="Overnight, gross (close->open)")
-    (1 + rets["overnight"] - 0.0005).cumprod().plot(ax=ax, label="Overnight, net of 5bps/day")
+    (1 + rets["overnight"] - PLOT_HAIRCUT_BPS / 10000).cumprod().plot(
+        ax=ax, label=f"Overnight, net of {PLOT_HAIRCUT_BPS}bps/day"
+    )
     (1 + rets["intraday"]).cumprod().plot(ax=ax, label="Intraday (open->close)")
     ax.set_yscale("log")
     ax.set_title("SPY: growth of $1, overnight vs. intraday vs. buy & hold")
@@ -109,12 +132,12 @@ def main() -> None:
     prices = load_prices(DATA_PATH)
     rets = build_returns(prices)
 
+    bh_row = summarize("buy_and_hold", rets["buy_and_hold"])
     rows = [
-        summarize("buy_and_hold", rets["buy_and_hold"]),
-        summarize("overnight (close->open)", rets["overnight"]),
+        bh_row,
         summarize("intraday (open->close)", rets["intraday"]),
     ]
-    rows += haircut_sweep(rets)
+    rows += haircut_sweep(rets, bh_row["ann_return"])
     print_summary(len(rets), rows)
 
     path = plot_equity_curves(rets)

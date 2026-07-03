@@ -76,6 +76,8 @@ leg and reports where the strategy stops beating buy-and-hold.
 
 Run it yourself: `pip install -r requirements.txt && python backtest.py`
 
+Run the test suite: `pip install -r requirements-dev.txt && python -m pytest test_backtest.py -q`
+
 Results, SPY, 2000-06-06 through 2026-03-20 (6,592 trading days):
 
 | strategy | total return | annualized return | annualized vol | Sharpe | beats buy&hold? |
