@@ -184,6 +184,62 @@ What the numbers say:
    ~40–60 majority-winners out of 978, most of them the same momentum
    names.
 
+## Experiment: gap-down-wait exit (recovery-fraction model)
+
+Variation on the exit rule: still buy every close, but if the next open is
+**below** the buy price, don't sell at the open — wait, and assume the exit
+captures fraction *x* of that day's recovery off the open, i.e. sell at
+`Open + x*(High − Open)`. If the open is at or above the buy price, sell at
+the open as before. x=0 is exactly the baseline strategy. Run with:
+
+```
+python rolling_backtest.py --exit-x "0,25,50,75,100"
+```
+
+> **This is a diagnostic, not a tradeable backtest.** The day's high is
+> only knowable after the close, so "capture x% of the recovery" is not a
+> placeable order. The model also never does worse than selling at the
+> open (a negative recovery is clipped to zero), so it adds a strictly
+> upward bias on every gap-down day — and gap-down days are ~46% of all
+> days. With a median gap-day recovery of ~1% (High above Open), even
+> x=25% injects roughly 11bps/day ≈ +33%/yr of assumed execution skill,
+> which swamps both the trading-cost haircut and the overnight anomaly
+> itself.
+
+Results (3y windows, % of stock-windows beating SPX; full grid in
+`results/gap_wait_summary.csv`):
+
+| haircut | x=0 (sell at open) | x=25% | x=50% | x=75% | x=100% |
+|---|---:|---:|---:|---:|---:|
+| 0bps | 45.0 | 99.5 | 99.9 | 100.0 | 100.0 |
+| 2bps | 31.1 | 98.7 | 99.9 | 99.9 | 99.9 |
+| 5bps | 17.0 | 94.4 | 99.8 | 99.9 | 99.9 |
+| 10bps | 6.6 | 72.3 | 99.4 | 99.8 | 99.8 |
+| 20bps | 1.6 | 27.0 | 80.8 | 98.9 | 99.7 |
+| 50bps | 0.2 | 1.9 | 13.0 | 37.4 | 64.7 |
+| 100bps | 0.0 | 0.2 | 1.1 | 4.1 | 11.9 |
+
+![Gap-down-wait exit: % beating SPX by haircut and recovery fraction](results/gap_wait_pct_beating.png)
+
+Reading:
+
+1. **The jump from x=0 to x=25% is the look-ahead bias, not a strategy.**
+   Nearly every stock-window "beats SPX" once the model is allowed to
+   sell above the open on gap-down days — because it grants ~33%/yr of
+   guaranteed intraday exit skill for free. No execution method delivers
+   a fixed fraction of a maximum that isn't known until the day ends.
+2. **What the sweep is legitimately useful for:** it shows where the
+   strategy's sensitivity lives. Almost all of the improvement is already
+   present at x=25%, meaning the baseline's losses concentrate in
+   selling gap-downs *at the open*, the worst moment of the day on
+   average (overnight sellers' flow). Any real improvement to the exit
+   has to be measured against implementable rules.
+3. **The implementable cousin** — place a limit order at breakeven
+   (yesterday's close) after a gap-down open, sell at the close if it
+   never fills — needs no future knowledge and can be run with the same
+   machinery (`build_wait_overnight` is the template). It was not part
+   of this run.
+
 ## Verdict
 
 Over this ~26-year SPY sample, the overnight leg captured about two-thirds
