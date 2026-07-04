@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 
 from backtest import TRADING_DAYS, annualize_return, build_returns, load_prices, summarize
-from rolling_backtest import benchmark_windows, generate_windows, window_returns_table
+from rolling_backtest import (benchmark_windows, build_wait_overnight,
+                              generate_windows, window_returns_table)
 
 
 def _trading_index(start_year: int, end_year: int) -> pd.DatetimeIndex:
@@ -83,6 +84,48 @@ def test_strategy_ann_return_matches_direct_computation():
                     & (overnight.index < pd.Timestamp(2016, 1, 1))]
     expected = annualize_return((1 + seg).cumprod())
     assert abs(row["strategy_ann_ret"] - expected) < 1e-12
+
+
+def _ohlc(rows):
+    """rows: list of (open, high, close) tuples on consecutive business days."""
+    idx = pd.bdate_range("2020-01-01", periods=len(rows))
+    return pd.DataFrame(
+        {"Open": [r[0] for r in rows],
+         "High": [r[1] for r in rows],
+         "Close": [r[2] for r in rows]},
+        index=idx,
+    )
+
+
+def test_wait_overnight_x0_equals_plain_overnight():
+    prices = _ohlc([(100, 103, 102), (99, 104, 101), (103, 103, 100), (95, 99, 98)])
+    plain = build_returns(prices)["overnight"]
+    waited = build_wait_overnight(prices, 0.0)
+    assert (waited - plain).abs().max() < 1e-15
+
+
+def test_wait_overnight_gap_down_known_answer():
+    # Day 2 gaps down (open 95 < prev close 100) then recovers to high 105:
+    # x=0.5 sells at 95 + 0.5*(105-95) = 100 -> return exactly 0.
+    prices = _ohlc([(98, 101, 100), (95, 105, 104)])
+    ret = build_wait_overnight(prices, 0.5)
+    assert abs(ret.iloc[0] - 0.0) < 1e-15
+    # x=1 top-ticks the high: 105/100 - 1 = 5%
+    assert abs(build_wait_overnight(prices, 1.0).iloc[0] - 0.05) < 1e-15
+
+
+def test_wait_overnight_no_gap_ignores_x():
+    # Day 2 opens above prev close -> sell at open regardless of x.
+    prices = _ohlc([(98, 101, 100), (102, 110, 108)])
+    for x in (0.0, 0.5, 1.0):
+        assert abs(build_wait_overnight(prices, x).iloc[0] - 0.02) < 1e-15
+
+
+def test_wait_overnight_bad_high_clips_to_open():
+    # Corrupt row with High < Open on a gap-down day: negative recovery is
+    # clipped, so the exit is the open.
+    prices = _ohlc([(98, 101, 100), (95, 94, 93)])
+    assert abs(build_wait_overnight(prices, 1.0).iloc[0] - (95 / 100 - 1)) < 1e-15
 
 
 def test_benchmark_windows_spy_sanity():

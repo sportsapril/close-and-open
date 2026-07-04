@@ -40,6 +40,27 @@ SEQ_CMAP = LinearSegmentedColormap.from_list(
 )
 
 
+def build_wait_overnight(prices: pd.DataFrame, x: float) -> pd.Series:
+    """Overnight returns with a gap-down-wait exit.
+
+    Buy at every close. Next day: if the open is at or above the buy price,
+    sell at the open (the plain overnight strategy). If the stock gapped
+    down, wait, and assume the exit captures fraction x of the day's
+    recovery off the open: sell at Open + x*(High - Open).
+
+    x=0 is exactly the plain overnight strategy. x uses the day's High,
+    which is unknowable in real time — treat results as an upper-bound
+    diagnostic, not a tradeable backtest.
+    """
+    prev_close = prices["Close"].shift(1)
+    # A handful of vendored rows have High < Open; a negative "recovery"
+    # is meaningless, so clip it to zero (sell at the open).
+    recovery = (prices["High"] - prices["Open"]).clip(lower=0)
+    sell = prices["Open"].where(prices["Open"] >= prev_close,
+                                prices["Open"] + x * recovery)
+    return (sell / prev_close - 1).dropna()
+
+
 def generate_windows(index: pd.DatetimeIndex, window_years: int,
                      min_coverage: float = MIN_COVERAGE) -> list[tuple]:
     """Calendar windows [Jan 1 Y, Jan 1 Y+W) with annual stride.
@@ -62,8 +83,12 @@ def generate_windows(index: pd.DatetimeIndex, window_years: int,
 
 def window_returns_table(overnight: pd.Series, spx_ann_by_window: dict,
                          ticker: str, min_coverage: float,
-                         haircuts_bps=HAIRCUTS_BPS) -> list[dict]:
-    """All (window, haircut) rows for one ticker's overnight return series."""
+                         haircuts_bps=HAIRCUTS_BPS,
+                         extra: dict | None = None) -> list[dict]:
+    """All (window, haircut) rows for one ticker's overnight return series.
+
+    `extra` fields (e.g. the exit-model parameter) are copied into every row.
+    """
     rows = []
     for w in WINDOW_YEARS:
         for year, start, end, n_days in generate_windows(overnight.index, w, min_coverage):
@@ -83,6 +108,7 @@ def window_returns_table(overnight: pd.Series, spx_ann_by_window: dict,
                     "strategy_ann_ret": ann,
                     "spx_ann_ret": spx_ann,
                     "beats_spx": ann > spx_ann,
+                    **(extra or {}),
                 })
     return rows
 
@@ -143,6 +169,30 @@ def plot_timeseries(by_year: pd.DataFrame, plot_haircut: int, path: str) -> None
     plt.close(fig)
 
 
+def plot_gap_wait(pct: pd.DataFrame, window_years: int, path: str) -> None:
+    """pct: index=haircut_bps, columns=exit_x (%), values=% beating SPX."""
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    positions = range(len(pct.index))
+    for i, x in enumerate(pct.columns):
+        color = SERIES_COLORS[i % len(SERIES_COLORS)]
+        label = "sell at open (x=0)" if x == 0 else f"x={x:.0f}% of recovery"
+        ax.plot(positions, pct[x], label=label, color=color,
+                linewidth=2, marker="o", markersize=5)
+        ax.annotate(f"{x:.0f}%", (positions[-1], pct[x].iloc[-1]),
+                    xytext=(8, 0), textcoords="offset points",
+                    color=color, fontsize=9, va="center")
+    ax.set_xticks(list(positions), [f"{b}bps" for b in pct.index])
+    ax.set_xlabel("Haircut per round trip")
+    ax.set_ylabel("% of stock-windows beating SPX")
+    ax.set_title(f"Gap-down-wait exit ({window_years}y windows): "
+                 "% beating SPX by haircut and recovery fraction x")
+    ax.grid(alpha=0.25, linewidth=0.5)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prices-dir", default=os.path.join("data", "prices"))
@@ -153,7 +203,13 @@ def main() -> None:
                         help="haircut (bps) used for the time-series chart")
     parser.add_argument("--top", type=int, default=20,
                         help="how many top tickers to print")
+    parser.add_argument("--exit-x", default="0",
+                        help="comma-separated recovery fractions in percent "
+                             "for the gap-down-wait exit (0 = plain sell-at-open)")
+    parser.add_argument("--gap-plot-window", type=int, default=3,
+                        help="window size (years) for the gap-wait chart")
     args = parser.parse_args()
+    exit_xs = [float(v) for v in args.exit_x.split(",")]
 
     files = sorted(glob.glob(os.path.join(args.prices_dir, "*.csv")))
     if not files:
@@ -161,18 +217,23 @@ def main() -> None:
     os.makedirs(args.out, exist_ok=True)
 
     spx_ann = benchmark_windows(args.spy, args.min_coverage)
-    print(f"Benchmark: {len(spx_ann)} valid SPY windows; universe: {len(files)} tickers")
+    print(f"Benchmark: {len(spx_ann)} valid SPY windows; universe: {len(files)} tickers; "
+          f"exit x sweep: {exit_xs}")
 
     all_rows = []
     skipped = []
     for i, path in enumerate(files, 1):
         ticker = os.path.splitext(os.path.basename(path))[0]
         try:
-            overnight = build_returns(load_prices(path))["overnight"]
+            prices = load_prices(path, columns=("Open", "High", "Close"))
         except (AssertionError, ValueError, KeyError) as e:
             skipped.append((ticker, str(e)))
             continue
-        all_rows += window_returns_table(overnight, spx_ann, ticker, args.min_coverage)
+        for x in exit_xs:
+            overnight = build_wait_overnight(prices, x / 100)
+            all_rows += window_returns_table(overnight, spx_ann, ticker,
+                                             args.min_coverage,
+                                             extra={"exit_x": x})
         if i % 100 == 0:
             print(f"  processed {i}/{len(files)} tickers...")
 
@@ -185,17 +246,34 @@ def main() -> None:
     results_path = os.path.join(args.out, "rolling_results.csv.gz")
     results.to_csv(results_path, index=False, compression="gzip")
 
+    # The legacy outputs (summary, heatmap, time series, top tickers)
+    # describe the plain sell-at-open strategy: the x=0 slice.
+    base = results[results["exit_x"] == 0]
+
     # % of stock-windows beating SPX, per (window size, haircut)
-    pct = (results.groupby(["window_years", "haircut_bps"])["beats_spx"]
+    pct = (base.groupby(["window_years", "haircut_bps"])["beats_spx"]
            .mean().mul(100).unstack())
     summary = pct.round(1)
     summary.to_csv(os.path.join(args.out, "summary_by_window_haircut.csv"))
-    print("\n% of stock-windows where overnight strategy beats SPX buy-and-hold:")
+    print("\n% of stock-windows where overnight strategy beats SPX buy-and-hold (x=0):")
     print(summary.to_string())
 
     plot_heatmap(pct, os.path.join(args.out, "pct_beating_heatmap.png"))
 
-    at_h = results[results["haircut_bps"] == args.plot_haircut]
+    if len(exit_xs) > 1:
+        gap = (results[results["window_years"] == args.gap_plot_window]
+               .groupby(["haircut_bps", "exit_x"])["beats_spx"]
+               .mean().mul(100).unstack())
+        gap_all = (results.groupby(["exit_x", "window_years", "haircut_bps"])["beats_spx"]
+                   .mean().mul(100).round(1).unstack())
+        gap_all.to_csv(os.path.join(args.out, "gap_wait_summary.csv"))
+        print(f"\nGap-down-wait exit, {args.gap_plot_window}y windows, "
+              "% of stock-windows beating SPX by recovery fraction x:")
+        print(gap.round(1).to_string())
+        plot_gap_wait(gap, args.gap_plot_window,
+                      os.path.join(args.out, "gap_wait_pct_beating.png"))
+
+    at_h = base[base["haircut_bps"] == args.plot_haircut]
     by_year = (at_h.groupby(["window_start", "window_years"])["beats_spx"]
                .mean().mul(100).unstack())
     plot_timeseries(by_year, args.plot_haircut, os.path.join(args.out, "pct_beating_timeseries.png"))

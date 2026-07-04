@@ -18,7 +18,7 @@ adjusted series credits the overnight leg correctly.
 
 Output layout:
     data/universe.csv          ticker, name, sector (the universe actually used)
-    data/prices/{TICKER}.csv   Date, Open, Close (ISO dates, ascending)
+    data/prices/{TICKER}.csv   Date, Open, High, Low, Close (ISO dates, ascending)
 
 Existing per-ticker files are skipped, so an interrupted run resumes where
 it left off. Usage:
@@ -121,15 +121,19 @@ def download_ticker(ticker: str, retries: int = 3, backoff: float = 2.0) -> pd.D
             out = pd.DataFrame({
                 "Date": dates,
                 "Open": quote["open"],
+                "High": quote["high"],
+                "Low": quote["low"],
                 "Close": quote["close"],
                 "AdjClose": adjclose,
             }).dropna()
-            # Scale Open by the same split+dividend factor as Close, then
-            # keep only the adjusted columns under the standard names.
-            out["Open"] = out["Open"] * out["AdjClose"] / out["Close"]
+            # Scale every price by the same split+dividend factor as Close,
+            # then keep the adjusted columns under the standard names.
+            factor = out["AdjClose"] / out["Close"]
+            for col in ("Open", "High", "Low"):
+                out[col] = out[col] * factor
             out["Close"] = out["AdjClose"]
-            out = out[(out["Open"] > 0) & (out["Close"] > 0)]
-            out = out.drop_duplicates("Date")[["Date", "Open", "Close"]]
+            out = out[(out[["Open", "High", "Low", "Close"]] > 0).all(axis=1)]
+            out = out.drop_duplicates("Date")[["Date", "Open", "High", "Low", "Close"]]
             if out.empty:
                 logger.warning("%s: no usable rows", ticker)
                 return None
@@ -141,6 +145,19 @@ def download_ticker(ticker: str, retries: int = 3, backoff: float = 2.0) -> pd.D
             time.sleep(wait)
     logger.error("%s: giving up after %d attempts", ticker, retries)
     return None
+
+
+def _is_current(path: str) -> bool:
+    """True if the file exists and already has the full OHLC schema.
+
+    Files written before High/Low were added are re-downloaded rather
+    than skipped by the resume logic.
+    """
+    if not os.path.exists(path):
+        return False
+    with open(path) as f:
+        header = f.readline().strip().split(",")
+    return {"High", "Low"}.issubset(header)
 
 
 def main() -> None:
@@ -163,7 +180,7 @@ def main() -> None:
     done = skipped = failed = 0
     for ticker in tickers:
         path = os.path.join(PRICES_DIR, f"{ticker}.csv")
-        if os.path.exists(path):
+        if _is_current(path):
             skipped += 1
             continue
         data = download_ticker(ticker)

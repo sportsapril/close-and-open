@@ -32,7 +32,7 @@ def _parse_dates(raw: pd.Series) -> pd.Series:
     raise ValueError(f"unrecognized date format, e.g. {raw.iloc[0]!r}")
 
 
-def load_prices(path: str) -> pd.DataFrame:
+def load_prices(path: str, columns: tuple = ("Open", "Close")) -> pd.DataFrame:
     if not os.path.exists(path):
         raise FileNotFoundError(
             f"{path!r} not found (cwd={os.getcwd()!r}); "
@@ -42,7 +42,7 @@ def load_prices(path: str) -> pd.DataFrame:
     date_col = "DateTime" if "DateTime" in df.columns else "Date"
     df[date_col] = _parse_dates(df[date_col])
     df = df.sort_values(date_col).set_index(date_col)
-    df = df[["Open", "Close"]]
+    df = df[list(columns)]
 
     # The source CSV is fetched in chunks (newest-year-first) and is not
     # globally sorted on disk; the sort above is load-bearing, not
@@ -50,7 +50,7 @@ def load_prices(path: str) -> pd.DataFrame:
     # breaking, and against corrupt rows (zero/negative prices).
     assert df.index.is_monotonic_increasing, "prices are not sorted by date"
     assert not df.index.duplicated().any(), "duplicate dates in price data"
-    assert (df[["Open", "Close"]] > 0).all().all(), "non-positive price in data"
+    assert (df > 0).all().all(), "non-positive price in data"
     return df
 
 
